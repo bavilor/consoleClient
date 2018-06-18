@@ -1,4 +1,4 @@
-import sys, argparse, requests, base64, struct, json, pem, os
+import sys, argparse, requests, base64, struct, json, pem, os, struct
 from cryptography.hazmat.backends import default_backend, interfaces
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization, hashes, keywrap, padding
@@ -18,7 +18,7 @@ def create_parser():
 	send_order_parser.add_argument('--name', '-n', nargs='+')
 	send_order_parser.add_argument('--amount', '-a', nargs='+')
 
-	request_orders_list_parser.add_parser('print-all-orders')
+	request_orders_list_parser = subparsers.add_parser('print-all-orders')
 
 	return parser
 
@@ -26,7 +26,7 @@ def create_parser():
 def read_private_keys():
 	pem_encr_postfix = '-----END ENCRYPTED PRIVATE KEY-----\n'
 	keys = []
-	key = '';
+	key = ''
 
 	try:
 		#read from file
@@ -36,7 +36,7 @@ def read_private_keys():
 		for i in serKey:
 			key += i;
 
-			if(i == pem_encr_postfix):
+			if i == pem_encr_postfix:
 				enc_pem = serialization.load_pem_private_key(bytes(key, 'utf-8'), password=b'hellothere', backend=default_backend())
 				keys.append(enc_pem)
 				key = ''
@@ -61,10 +61,29 @@ def generate_key_pair():
 		file.write(pem_key)
 	print("Keys're generated")
 
+#Decrypt data
+def decrypt_data(private_key, aes_bytes, iv_bytes, encr_data):
+	try:
+		aes_bytes = private_key.decrypt(aes_bytes, get_oaep_padding())
+		print(aes_bytes)
+		iv_bytes = private_key.decrypt(iv_bytes, get_oaep_padding())
+		print(iv_bytes)
+
+		cipher = Cipher(algorithms.AES(aes_bytes), modes.CBC(iv_bytes), backend=default_backend())
+		decr = cipher.decryptor()
+		data = decr.update(encr_data) + decr.finalize()
+
+		unpadder = padding.PKCS7(128).unpadder()
+
+		return data
+	# return unpadder.update(data) + unpadder.finalize()
+	except ValueError:
+		print()	
+
 #Print keys
 def print_all_keys():
 	keys = read_private_keys();
-	if(keys != []):	
+	if keys != []:	
 		for i in keys:
 			print(i)
 
@@ -113,18 +132,9 @@ def restore_data(encr_server_response, private_key):
 	encr_iv = []
 	encr_data = []
 
-	index = 0
-	while(index < 256):
-		encr_aes.append(encr_server_response[index])
-		index += 1
-	
-	while(index < 512):
-		encr_iv.append(encr_server_response[index])
-		index += 1
-
-	while(index < len(encr_server_response)):
-		encr_data.append(encr_server_response[index])
-		index += 1
+	encr_aes = encr_server_response[:256]
+	encr_iv = encr_server_response[256:512]
+	encr_data = encr_server_response[512:]
 
 	aes_bytes = private_key.decrypt(
 		encr_aes,
@@ -172,6 +182,7 @@ def encrypt_data(data):
 	aes_iv_data = []
 
 	index = 0
+
 	while index < 256:
 		aes_iv_data.append(encr_aes[index])
 		index += 1;
@@ -188,8 +199,8 @@ def encrypt_data(data):
 def request_spk():
 	key = read_private_keys()
 
-	if(key != []):
-		private_key = key[len(key) - 1]
+	if key != []:
+		private_key = key[len(key)-1]
 		encr_server_public_key = request_data('http://localhost:8080/getServerPublicKey', private_key.public_key())
 
 		server_public_key_bytes = restore_data(encr_server_public_key, private_key)
@@ -202,7 +213,7 @@ def request_spk():
 def request_price_list():
 	key = read_private_keys()
 
-	if(key != []):
+	if key != []:
 		private_key = key[len(key)-1]
 		encr_price_list = request_data('http://localhost:8080/getProducts', private_key.public_key())
 
@@ -253,6 +264,32 @@ def send_order_list(names, amount):
 			print("No keys. Generate it by use 'generate-key-pair'")
 	else:
 		print("Numbers of the name parameters isn't equals amount parameters")
+
+#Request order list
+def request_order_list():
+	keys = read_private_keys()
+
+	if keys != []:
+		private_key = keys[len(keys)-1]
+		encr_orders = request_data('http://localhost:8080/getOrder', private_key.public_key())
+		
+		position = 0
+
+		while position < len(encr_orders):
+			length = int(private_key.decrypt(encr_orders[512+position:768+position], get_oaep_padding()))
+
+			aes_bytes = encr_orders[position:256+position]
+			iv_bytes = encr_orders[position+256:512+position]
+			encr_data = encr_orders[position+512:length+position]
+
+			for key in keys:
+				print(decrypt_data(key, aes_bytes, iv_bytes, encr_data))
+
+			position += 512 + length
+
+	else:
+		print("No keys. Generate it by use 'generate-key-pair'")
+
 
 
 #Main menthod(used to parse command)
