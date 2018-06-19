@@ -1,6 +1,6 @@
 import sys, argparse, requests, base64, struct, json, pem, os, struct
 from cryptography.hazmat.backends import default_backend, interfaces
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import rsa, utils
 from cryptography.hazmat.primitives import serialization, hashes, keywrap, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -19,6 +19,10 @@ def create_parser():
 	send_order_parser.add_argument('--amount', '-a', nargs='+')
 
 	request_orders_list_parser = subparsers.add_parser('print-all-orders')
+
+	send_update_parser = subparsers.add_parser('send-update')
+	send_update_parser.add_argument('--name', '-n', nargs='+')
+	send_update_parser.add_argument('--amount', '-a', nargs='+')
 
 	return parser
 
@@ -54,20 +58,32 @@ def generate_key_pair():
  		encoding=serialization.Encoding.PEM,
  		format=serialization.PrivateFormat.PKCS8,
  		encryption_algorithm=serialization.BestAvailableEncryption(b'hellothere')
- 		)
+ 	)
 
 	#write in pem file
 	with open('keyStore.pem', 'ab') as file:
 		file.write(pem_key)
 	print("Keys're generated")
 
+#Create sign
+def generate_sign(private_key):
+	from cryptography.hazmat.primitives.asymmetric import padding
+
+	sign = private_key.sign(
+		b'key',
+		padding.PSS(
+			mgf=padding.MGF1(hashes.SHA256()),
+			salt_length=128
+		),
+		hashes.SHA256()
+	)
+	return sign
+
 #Decrypt data
 def decrypt_data(private_key, aes_bytes, iv_bytes, encr_data):
 	try:
 		aes_bytes = private_key.decrypt(aes_bytes, get_oaep_padding())
-		print(aes_bytes)
 		iv_bytes = private_key.decrypt(iv_bytes, get_oaep_padding())
-		print(iv_bytes)
 
 		cipher = Cipher(algorithms.AES(aes_bytes), modes.CBC(iv_bytes), backend=default_backend())
 		decr = cipher.decryptor()
@@ -75,11 +91,10 @@ def decrypt_data(private_key, aes_bytes, iv_bytes, encr_data):
 
 		unpadder = padding.PKCS7(128).unpadder()
 
-		return data
-	# return unpadder.update(data) + unpadder.finalize()
+		return unpadder.update(data) + unpadder.finalize()
 	except ValueError:
-		print()	
-
+		pass
+			
 #Print keys
 def print_all_keys():
 	keys = read_private_keys();
@@ -91,10 +106,10 @@ def print_all_keys():
 def get_oaep_padding():
 	from cryptography.hazmat.primitives.asymmetric import padding
 	oaep = padding.OAEP(
-			mgf=padding.MGF1(algorithm=hashes.SHA256()),
-			algorithm=hashes.SHA256(),
-			label=None
-		)
+		mgf=padding.MGF1(algorithm=hashes.SHA256()),
+		algorithm=hashes.SHA256(),
+		label=None
+	)
 	return oaep
 
 #Request data from server
@@ -112,7 +127,7 @@ def request_data(url, public_key):
 	return base64.b64decode(response.content)
 
 #Send data to the server
-def send_data(url, data, public_key):
+def send_data(url, data, public_key, update):
 	public_key_bytes = public_key.public_bytes(
 		encoding=serialization.Encoding.DER,
 		format=serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -122,8 +137,24 @@ def send_data(url, data, public_key):
 
 	b64_data = base64.b64encode(bytes(data))
 
+	if update:
+		response = requests.post(url, b64_data, headers=header)
+		if response.status_code == 200:
+			keys = read_private_keys()
+			public_keys = []
 
-	response = requests.post(url, b64_data, headers=header)
+			for key in keys:
+				public = key.public_key().public_bytes(
+					encoding=serialization.Encoding.DER,
+					format=serialization.PublicFormat.SubjectPublicKeyInfo
+				)
+				if(public_key_bytes != public):
+					public_keys.append((base64.b64encode(public)).decode('utf8'))
+
+			requests.post('http://localhost:8080/deleteUsers', json.dumps(public_keys), headers=header)
+	else:
+		response = requests.post(url, b64_data, headers=header)
+
 	return response
 
 #Restore the data if it was encrypted with AES
@@ -155,7 +186,18 @@ def restore_data(encr_server_response, private_key):
 	return unpadder.update(data) + unpadder.finalize()
 
 #Encrypt data with aes key
-def encrypt_data(data):
+def encrypt_data(data, update, private_key):
+	if update:
+		resp = request_order_list()
+
+		for d in data:
+			for r in resp:
+				if r['name'] == d['name']:
+					r['amount'] = d['amount']
+					break
+		
+		data = resp
+
 	json_data_bytes = (json.dumps(data)).encode('utf-8')
 
 	server_public_key = request_spk()
@@ -181,17 +223,12 @@ def encrypt_data(data):
 		
 	aes_iv_data = []
 
-	index = 0
+	aes_iv_data.extend(encr_aes)
+	aes_iv_data.extend(encr_iv)
+	aes_iv_data.extend(encr_data)
 
-	while index < 256:
-		aes_iv_data.append(encr_aes[index])
-		index += 1;
-	while index < 512:
-		aes_iv_data.append(encr_iv[index-256])
-		index += 1;
-	while index < (512+len(encr_data)):
-		aes_iv_data.append(encr_data[index-512])
-		index += 1;	
+	if update:
+		aes_iv_data.extend(generate_sign(private_key))
 
 	return aes_iv_data
 
@@ -212,7 +249,6 @@ def request_spk():
 #Request price lsit
 def request_price_list():
 	key = read_private_keys()
-
 	if key != []:
 		private_key = key[len(key)-1]
 		encr_price_list = request_data('http://localhost:8080/getProducts', private_key.public_key())
@@ -222,12 +258,13 @@ def request_price_list():
 		print("No keys. Generate it by use 'generate-key-pair'")
 
 #Send order list
-def send_order_list(names, amount):
+def send_order_list(url, names, amount, update):
 	if len(names) == len(amount):
 		key = read_private_keys()
 
 		if key != []:
 			price_list = json.loads((request_price_list()).decode('utf-8'))
+			private_key = key[len(key)-1]
 			wrong_products = False
 
 			#Check parameters names
@@ -256,8 +293,8 @@ def send_order_list(names, amount):
 					if product.get('amount') != None:
 						order_list.append(product)
 
-				encr_data = encrypt_data(order_list)
-				return send_data('http://localhost:8080/setOrder', encr_data, key[len(key)-1].public_key())
+				encr_data = encrypt_data(order_list, update, private_key)
+				return send_data(url, encr_data, private_key.public_key(), update)
 			else:
 				print("This products doesn't exist. Check price list")
 		else:
@@ -274,22 +311,48 @@ def request_order_list():
 		encr_orders = request_data('http://localhost:8080/getOrder', private_key.public_key())
 		
 		position = 0
+		decr_data_list = []
+		data = []
 
 		while position < len(encr_orders):
 			length = int(private_key.decrypt(encr_orders[512+position:768+position], get_oaep_padding()))
 
+
 			aes_bytes = encr_orders[position:256+position]
 			iv_bytes = encr_orders[position+256:512+position]
-			encr_data = encr_orders[position+512:length+position]
+			encr_data = encr_orders[position+768:length+position+768]
 
 			for key in keys:
-				print(decrypt_data(key, aes_bytes, iv_bytes, encr_data))
+				decr_data_bytes = decrypt_data(key, aes_bytes, iv_bytes, encr_data)
+				if  decr_data_bytes != None:
+					decr_data_list.extend(json.loads(decr_data_bytes))	
 
-			position += 512 + length
+			position += 768 + length
 
+		if decr_data_list != None:
+			for order in decr_data_list:
+				if data == []:
+					data.append(order)
+					continue
+				else:
+					index = 0
+					while(index<len(data)):
+						product = data[index]
+						if product['name'] == order['name']:
+							product['amount'] += order['amount']
+							index += 1
+							break
+						elif index == len(data)-1:	
+							data.append(order)
+							index += 1
+							break
+						else:
+							index += 1
+						
+
+		return data	
 	else:
 		print("No keys. Generate it by use 'generate-key-pair'")
-
 
 
 #Main menthod(used to parse command)
@@ -312,10 +375,20 @@ if __name__ == '__main__':
     	print(response.decode('utf-8'))
 
     elif namespace.command == 'send-order':
-    	response = send_order_list(namespace.name, namespace.amount)
+    	response = send_order_list('http://localhost:8080/setOrder', namespace.name, namespace.amount, False)
     	if(response.status_code == 200):
     		print("OK")
     	else:
     		print("Error " + str(response.status_code))
+
     elif namespace.command == 'print-all-orders':
-    	response = request_order_list()    	
+    	response = request_order_list()
+    	for order in response:
+    		print(order)
+
+    elif namespace.command == 'send-update':
+    	response = send_order_list('http://localhost:8080/updateOrder', namespace.name, namespace.amount, True)
+    	if(response.status_code == 200):
+    		print("OK")
+    	else:
+    		print("Error " + str(response.status_code))
