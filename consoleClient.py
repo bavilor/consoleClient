@@ -238,11 +238,9 @@ def request_spk():
 
 	if key != []:
 		private_key = key[len(key)-1]
-		encr_server_public_key = request_data('http://localhost:8080/getServerPublicKey', private_key.public_key())
+		response = request_data('http://localhost:8080/getServerPublicKey', private_key.public_key())
 
-		server_public_key_bytes = restore_data(encr_server_public_key, private_key)
-
-		return serialization.load_der_public_key(bytes(server_public_key_bytes), backend=default_backend())
+		return serialization.load_der_public_key(bytes(response), backend=default_backend())
 	else:
 		print("No keys. Generate it by use 'generate-key-pair'")
 
