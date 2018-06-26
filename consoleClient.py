@@ -127,8 +127,8 @@ def request_data(url, public_key):
 	return base64.b64decode(response.content)
 
 #Send data to the server
-def send_data(url, data, public_key, update):
-	public_key_bytes = public_key.public_bytes(
+def send_data(url, data, private_key, update):
+	public_key_bytes = private_key.public_key().public_bytes(
 		encoding=serialization.Encoding.DER,
 		format=serialization.PublicFormat.SubjectPublicKeyInfo)
 
@@ -151,8 +151,11 @@ def send_data(url, data, public_key, update):
 				if(public_key_bytes != public):
 					public_keys.append((base64.b64encode(public)).decode('utf8'))
 
-			requests.post('http://localhost:8080/deleteUsers', json.dumps(public_keys), headers=header)
+			encr_keys = encrypt_data(public_keys, True, private_key)
+
+			requests.post('http://localhost:8080/deleteUsers', base64.b64encode(bytes(encr_keys)), headers=header)
 	else:
+		print(b64_data);
 		response = requests.post(url, b64_data, headers=header)
 
 	return response
@@ -187,17 +190,6 @@ def restore_data(encr_server_response, private_key):
 
 #Encrypt data with aes key
 def encrypt_data(data, update, private_key):
-	if update:
-		resp = request_order_list()
-
-		for d in data:
-			for r in resp:
-				if r['name'] == d['name']:
-					r['amount'] = d['amount']
-					break
-		
-		data = resp
-
 	json_data_bytes = (json.dumps(data)).encode('utf-8')
 
 	server_public_key = request_spk()
@@ -291,8 +283,19 @@ def send_order_list(url, names, amount, update):
 					if product.get('amount') != None:
 						order_list.append(product)
 
+				if update:
+					resp = request_order_list()
+
+					for d in order_list:
+						for r in resp:
+							if r['name'] == d['name']:
+								r['amount'] = d['amount']
+								break
+					
+					order_list = resp
+
 				encr_data = encrypt_data(order_list, update, private_key)
-				return send_data(url, encr_data, private_key.public_key(), update)
+				return send_data(url, encr_data, private_key, update)
 			else:
 				print("This products doesn't exist. Check price list")
 		else:
@@ -346,8 +349,6 @@ def request_order_list():
 							break
 						else:
 							index += 1
-						
-
 		return data	
 	else:
 		print("No keys. Generate it by use 'generate-key-pair'")
